@@ -1,0 +1,334 @@
+STA4241 – Final Project 
+Flight Price Prediction Analysis
+By Jack Griffin
+
+Goals of this analysis:
+ 1) Explore flight price data and identify key drivers of price
+ 2) Model price or log(price) using multiple algorithms
+ 3) Compare model performance and select a final model
+ 
+# STEP ONE: Setup -- Packages and Libraries
+```{r}
+# Run this install line to install packages, if necessary (uncomment it)
+# install.packages(c("tidyverse", "readxl", "forcats", "caret", "glmnet", "ranger"))
+
+library(tidyverse)   # ggplot2, dplyr, etc.
+library(readxl)      # read_excel()
+library(forcats)     # factor level utilities (fct_infreq, fct_relevel)
+library(caret)       # createDataPartition() for stratified split
+library(glmnet)      # ridge / lasso / elastic net
+library(ranger)      # faster version of random forest
+```
+
+# STEP TWO: Load & Check Dataset
+```{r}
+# Load Excel dataset
+flights <- read_excel("Flight_Project_Dataset.xlsx")
+
+# Basic structure checks
+dim(flights)        # number of rows and columns
+names(flights)      # variable names
+glimpse(flights)    # types and first few entries
+summary(flights)    # quick descriptive statistics
+
+# Missing values and duplicates
+sum(is.na(flights))          # total number of NAs
+colSums(is.na(flights))      # NAs by column
+sum(duplicated(flights))     # number of duplicate rows
+```
+
+# STEP THREE: Explore Numeric Variables
+```{r}
+# Histogram of raw price
+ggplot(flights, aes(x = price)) +
+  geom_histogram(bins = 40, fill = "steelblue", color = "white") +
+  labs(title = "Flight Price Distribution",
+       x = "Price", y = "Count")
+
+# Histogram of log(price) to check skewness
+ggplot(flights, aes(x = log(price))) +
+  geom_histogram(bins = 40, fill = "darkorange", color = "white") +
+  labs(title = "Log-Transformed Flight Price Distribution",
+       x = "log(Price)", y = "Count")
+
+# Correlation matrix for numeric predictors
+num_vars   <- flights %>% select(price, duration, days_left)
+cor_matrix <- cor(num_vars)
+cor_matrix
+```
+
+# STEP FOUR: Log Transform Price & Inspect Categorical Effects
+```{r}
+# Create transformed target variable
+flights <- flights %>%
+  mutate(log_price = log(price))
+
+# Boxplots: raw price vs class and stops
+ggplot(flights, aes(x = class, y = price)) +
+  geom_boxplot() +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Price by Class", x = "Class", y = "Price (₹)")
+
+ggplot(flights, aes(x = stops, y = price)) +
+  geom_boxplot() +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Price by Number of Stops", x = "Stops", y = "Price (₹)")
+
+# Boxplots: log(price) vs class and stops
+ggplot(flights, aes(x = class, y = log_price)) +
+  geom_boxplot() +
+  labs(title = "log(Price) by Class", x = "Class", y = "log(Price)")
+
+ggplot(flights, aes(x = stops, y = log_price)) +
+  geom_boxplot() +
+  labs(title = "log(Price) by Number of Stops", x = "Stops", y = "log(Price)")
+
+# Grouped summaries (mean / median price and log_price)
+by_class <- flights %>%
+  group_by(class) %>%
+  summarise(
+    n              = n(),
+    mean_price     = mean(price),
+    median_price   = median(price),
+    mean_log_price = mean(log_price),
+    .groups        = "drop"
+  )
+
+by_stops <- flights %>%
+  group_by(stops) %>%
+  summarise(
+    n              = n(),
+    mean_price     = mean(price),
+    median_price   = median(price),
+    mean_log_price = mean(log_price),
+    .groups        = "drop"
+  )
+
+by_class
+by_stops
+```
+
+# STEP FIVE: Train/Test Split on Stratified Log(Price)
+```{r}
+set.seed(4241)
+
+# Stratified split to keep log_price distribution similar in train and test
+idx   <- createDataPartition(flights$log_price, p = 0.75, list = FALSE)
+train <- flights[idx, ]
+test  <- flights[-idx, ]
+
+# Check train/test sizes and similarity of log_price and price
+nrow(train); nrow(test)
+
+train_summ <- train %>%
+  summarise(mean_log = mean(log_price),
+            sd_log   = sd(log_price),
+            mean_price = mean(price),
+            sd_price   = sd(price))
+
+test_summ <- test %>%
+  summarise(mean_log = mean(log_price),
+            sd_log   = sd(log_price),
+            mean_price = mean(price),
+            sd_price   = sd(price))
+
+train_summ
+test_summ
+
+# Compare distributions of key categorical variables
+prop_train_class <- prop.table(table(train$class))
+prop_test_class  <- prop.table(table(test$class))
+
+prop_train_stops <- prop.table(table(train$stops))
+prop_test_stops  <- prop.table(table(test$stops))
+
+prop_train_class; prop_test_class
+prop_train_stops; prop_test_stops
+```
+
+# STEP SIX: Baseline Multiple Linear Regression on Log(Price)
+```{r}
+# Set reference levels for factors (most frequent categories)
+train <- train %>%
+  mutate(
+    class          = fct_infreq(class) %>% fct_relevel("Economy"),
+    stops          = fct_infreq(stops) %>% fct_relevel("one"),
+    airline        = fct_infreq(airline) %>% fct_relevel(levels(fct_infreq(airline))[1]),
+    source_city    = fct_infreq(source_city) %>% fct_relevel(levels(fct_infreq(source_city))[1]),
+    destination_city = fct_infreq(destination_city) %>%
+                       fct_relevel(levels(fct_infreq(destination_city))[1]),
+    departure_time = fct_infreq(departure_time) %>%
+                     fct_relevel(levels(fct_infreq(departure_time))[1]),
+    arrival_time   = fct_infreq(arrival_time) %>%
+                     fct_relevel(levels(fct_infreq(arrival_time))[1])
+  )
+
+# Apply the same levels to test data (prevents new-level issues)
+test <- test %>%
+  mutate(
+    class          = factor(class,          levels = levels(train$class)),
+    stops          = factor(stops,          levels = levels(train$stops)),
+    airline        = factor(airline,        levels = levels(train$airline)),
+    source_city    = factor(source_city,    levels = levels(train$source_city)),
+    destination_city = factor(destination_city,
+                               levels = levels(train$destination_city)),
+    departure_time = factor(departure_time, levels = levels(train$departure_time)),
+    arrival_time   = factor(arrival_time,   levels = levels(train$arrival_time))
+  )
+
+# Fit baseline multiple linear regression model
+mlr_full <- lm(
+  log_price ~ class + stops + duration + days_left +
+    airline + source_city + destination_city +
+    departure_time + arrival_time,
+  data = train
+)
+
+summary(mlr_full)
+```
+
+# STEP SEVEN: Baseline MLR Performance (Training Set)
+```{r}
+# Predictions on training data (log and original price scales)
+train$mlr_pred_log   <- predict(mlr_full, newdata = train)
+train$mlr_pred_price <- exp(train$mlr_pred_log)
+
+# RMSE and R-squared on log scale
+postResample(train$mlr_pred_log, train$log_price)
+
+# RMSE on original price scale
+rmse_price_train <- sqrt(mean((train$price - train$mlr_pred_price)^2))
+rmse_price_train
+```
+
+# STEP EIGHT: Regularized Regression (Ridge/Lasso/Elastic Net)
+```{r}
+# Use a smaller training subset for glmnet to reduce computation time
+set.seed(4241)
+train_small <- train %>% sample_n(25000)
+
+# Create model matrix (glmnet requires numeric matrix; factors are one-hot encoded)
+x_train <- model.matrix(
+  log_price ~ class + stops + duration + days_left +
+    airline + source_city + destination_city +
+    departure_time + arrival_time,
+  data = train_small
+)[, -1]   # drop intercept column
+
+y_train <- train_small$log_price
+
+# Fit ridge, elastic net, and lasso models via cross-validated glmnet
+alphas <- c(0, 0.5, 1)     # 0 = ridge, 0.5 = elastic net, 1 = lasso
+names(alphas) <- c("ridge", "elastic_net", "lasso")
+
+glmnet_models <- lapply(alphas, function(a) {
+  cv.glmnet(
+    x      = x_train,
+    y      = y_train,
+    alpha  = a,
+    nfolds = 5     # 5-fold CV for speed
+  )
+})
+
+# Compare CV errors and choose best alpha
+cv_errors <- sapply(glmnet_models, function(m) min(m$cvm))
+cv_errors
+
+best_name  <- names(which.min(cv_errors))   # "lasso" in this run
+best_model <- glmnet_models[[best_name]]
+best_name
+
+# Predict on FULL test set with the selected glmnet model
+x_test <- model.matrix(
+  log_price ~ class + stops + duration + days_left +
+    airline + source_city + destination_city +
+    departure_time + arrival_time,
+  data = test
+)[, -1]
+
+test$glmnet_pred_log   <- as.numeric(predict(best_model, newx = x_test, s = "lambda.min"))
+test$glmnet_pred_price <- exp(test$glmnet_pred_log)
+
+# Coefficients at best lambda (for interpretation)
+glmnet_coefs <- coef(best_model, s = "lambda.min")
+glmnet_coefs
+```
+
+# STEP NINE: Tree-Based Model -- Random Forest via ranger
+```{r}
+# Fit random forest on the same 25k subset for efficiency
+set.seed(4241)
+
+rf_model <- ranger(
+  formula    = log_price ~ class + stops + duration + days_left +
+                             airline + source_city + destination_city +
+                             departure_time + arrival_time,
+  data       = train_small,
+  num.trees  = 200,       # number of trees
+  mtry       = 4,         # predictors tried at each split
+  importance = "impurity"
+)
+
+# Predict on full test set
+rf_pred <- predict(rf_model, data = test)
+test$rf_pred_log   <- rf_pred$predictions
+test$rf_pred_price <- exp(test$rf_pred_log)
+
+# Variable importance (top 10)
+rf_vi <- sort(rf_model$variable.importance, decreasing = TRUE)
+rf_vi
+
+barplot(rf_vi[1:10],
+        las = 2,
+        main = "Random Forest Variable Importance (Top 10)")
+```
+
+# STEP TEN: Final Test-Set Model Comparison
+```{r}
+# Fitting Random Forest predictions
+rf_pred <- predict(rf_model, data = test)
+test$rf_pred_log   <- rf_pred$predictions
+test$rf_pred_price <- exp(test$rf_pred_log)
+
+# Baseline MLR predictions on TEST set
+test$mlr_pred_log   <- predict(mlr_full, newdata = test)
+test$mlr_pred_price <- exp(test$mlr_pred_log)
+
+# Helper functions for metrics
+rmse <- function(obs, pred) {
+  sqrt(mean((obs - pred)^2))
+}
+
+rsq <- function(obs, pred) {
+  cor(obs, pred)^2
+}
+
+# Build comparison table for all three models
+model_compare <- data.frame(
+  Model = c(
+    "Baseline MLR",
+    "Elastic Net (alpha = 0.5)",     # best_name in this run
+    "Random Forest (ranger)"
+  ),
+  
+  RMSE_log = c(
+    rmse(test$log_price, test$mlr_pred_log),
+    rmse(test$log_price, test$glmnet_pred_log),
+    rmse(test$log_price, test$rf_pred_log)
+  ),
+  
+  R2_log = c(
+    rsq(test$log_price, test$mlr_pred_log),
+    rsq(test$log_price, test$glmnet_pred_log),
+    rsq(test$log_price, test$rf_pred_log)
+  ),
+  
+  RMSE_price = c(
+    rmse(test$price, test$mlr_pred_price),
+    rmse(test$price, test$glmnet_pred_price),
+    rmse(test$price, test$rf_pred_price)
+  )
+)
+
+model_compare
+```
