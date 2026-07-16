@@ -1,6 +1,6 @@
 # Predicting Airline Ticket Prices Using Statistical Learning
 
-Built and compared three models in R to predict airline ticket prices using 300,153 flight records. The best model, **Random Forest, predicted prices within about ₹3,610 on average and explained 97% of the variation in price**. That is less than half the error of the other linear models.
+Built and compared three models in R to predict airline ticket prices using 300,153 flight records. The best model, **Random Forest, predicted prices within about ₹3,610 on average and explained 97% of the variation in price**. That is less than half the error of the linear models.
 
 ## Business Problem
 
